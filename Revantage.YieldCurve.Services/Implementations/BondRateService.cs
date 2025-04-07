@@ -87,29 +87,24 @@ public class BondRateService(IHttpClientFactory clientFactory, IOptions<External
                 .ToDictionary();
 
             // ----------- Step 1. Bootstrap the monthly bonds (maturities: 1,2,3,4 months) -----------
-            // For these bonds, the coupon is paid monthly.
-            // Coupon per month = (annual par rate/12)*100.
             int[] monthlyMaturities = { 1, 2, 3, 4 };
             foreach (int tenor in monthlyMaturities)
             {
-                decimal r = parRates[tenor].Rate / 100.0m;         // annual rate in decimal
-                decimal coupon = r * 100.0m / 12.0m;           // monthly coupon payment (par = 100)
+                decimal r = parRates[tenor].Rate / 100.0m;
+                decimal coupon = r * 100.0m / 12.0m;
                 decimal sum = 0.0m;
-                // Sum coupon payments from earlier months
+                
                 for (int i = 1; i < tenor; i++)
                 {
                     sum += coupon * _discountFactors[i];
                 }
-                // Price = 100 at par. Solve:
-                // 100 = sum(coupon*DF(i)) + (coupon + 100)*DF(m)
+
                 decimal df = (100.0m - sum) / (coupon + 100.0m);
                 _discountFactors[tenor] = df;
                 _logger.LogInformation($"{tenor}-month DF: {df:F5}");
             }
 
             // ----------- Step 2. Calculate the 6-month bond discount factor -----------
-            // For the 6-month bond, with semiannual coupon:
-            // Coupon per period = (parRate/2)*100.
             decimal r6 = parRates[6].Rate / 100.0m;
             decimal coupon6 = r6 * 100.0m / 2.0m;
             // Price = 100 = (coupon6+100)*DF(6)
@@ -118,27 +113,20 @@ public class BondRateService(IHttpClientFactory clientFactory, IOptions<External
             _logger.LogInformation($"6-month DF: {df6:F5}");
 
             // ----------- Step 3. Interpolate the missing 5-month discount factor -----------
-            // Assume a constant (geometric) forward rate between months 4 and 6:
-            // DF(5) = sqrt(DF(4) * DF(6))
             decimal df5 = (decimal)Math.Sqrt((double)_discountFactors[4] * (double)_discountFactors[6]);
             _discountFactors[5] = df5;
             _logger.LogInformation($"5-month DF (interpolated): {df5:F5}");
 
-            // ----------- Step 4. Bootstrap semiannual bonds (maturities: 12, 24, 36, 60 months) -----------
-            // For these bonds, payments are semiannual.
-            // We assume that between the last computed semiannual coupon date and the new bond’s maturity
-            // the forward rate is constant and equals the new bond’s semiannual coupon rate.
-            int lastComputedSemiPeriod = 1; // corresponds to the 6-month DF
-            int lastComputedMonth = 6;        // last computed maturity in months
+            // ----------- Step 4. Bootstrap semiannual bonds (maturities: 12, 24, 36, 60, 84, 120, 240, and 360 months) -----------
+            int lastComputedSemiPeriod = 1;
+            int lastComputedMonth = 6;
             int[] semiannualMaturities = { 12, 24, 36, 60, 84, 120, 240, 360 };
             foreach (int tenor in semiannualMaturities)
             {
-                int n = tenor / 6;                  // number of semiannual periods
-                decimal r = parRates[tenor].Rate / 100.0m;   // par rate for this bond (annualized)
-                decimal couponSemi = r * 100.0m / 2.0m;  // coupon per semiannual period
+                int n = tenor / 6;
+                decimal r = parRates[tenor].Rate / 100.0m;
+                decimal couponSemi = r * 100.0m / 2.0m;
 
-                // For missing coupon dates from the last computed semiannual date to maturity,
-                // assume DF(6*i) = DF(lastComputedMonth) / (1 + r/2)^(i - lastComputedSemiPeriod)
                 for (int i = lastComputedSemiPeriod + 1; i <= n; i++)
                 {
                     int periodMonth = i * 6;
@@ -152,9 +140,6 @@ public class BondRateService(IHttpClientFactory clientFactory, IOptions<External
             }
 
             // ----------- Step 5. Calculate Zero Rates for each maturity -----------
-            // For each maturity m (in months) with discount factor DF(m), compute:
-            // Monthly zero rate: (1/DF(m))^(1/m) - 1.
-            // Annual zero rate: (1/DF(m))^(12/m) - 1.
             foreach (var kvp in new SortedDictionary<int, decimal>(_discountFactors))
             {
                 int tenor = kvp.Key;
@@ -164,13 +149,6 @@ public class BondRateService(IHttpClientFactory clientFactory, IOptions<External
                 _monthlyZeroRates[tenor] = zeroMonthly;
                 _annualizedZeroRates[tenor] = zeroAnnual;
                 _logger.LogInformation($"{tenor}-month: Zero Monthly Rate = {(zeroMonthly * 100):F4}%, Zero Annual Rate = {(zeroAnnual * 100):F4}%");
-            }
-
-            // ----------- (Optional) Display all Discount Factors -----------
-            Console.WriteLine("\nAll Discount Factors:");
-            foreach (var kvp in new SortedDictionary<int, decimal>(_discountFactors))
-            {
-                Console.WriteLine($"{kvp.Key}-month DF: {kvp.Value:F5}");
             }
 
             return new Shared.Models.YieldCurve()
@@ -210,29 +188,25 @@ public class BondRateService(IHttpClientFactory clientFactory, IOptions<External
     {
         IEnumerable<BondRate> rates = new List<BondRate>();
 
-        decimal semiAnnualCoupon = parRateAnnual / 2.0m; // 0.0222
+        decimal semiAnnualCoupon = parRateAnnual / 2.0m;
         decimal price = 1.0m;
 
-        // Step 1: Bootstrap DF for 12 months (1 year par bond: 0.0222 + 1.0 paid at maturity)
-        // price = 0.0222 * DF6 + (1.0 + 0.0222) * DF12
         decimal cashflow12 = 1.0m + semiAnnualCoupon;
         decimal df12 = (price - (semiAnnualCoupon * df6)) / cashflow12;
 
-        // Step 2: Interpolate DF for months 7–11 using log-linear method
         var discountFactors = new Dictionary<int, decimal>();
         discountFactors[6] = df6;
         discountFactors[12] = df12;
 
         for (int m = 7; m <= 11; m++)
         {
-            double t = m / 12.0; // time in years
+            double t = m / 12.0; 
             double logDf6 = Math.Log((double)df6);
             double logDf12 = Math.Log((double)df12);
             double logDfm = logDf6 + ((m - 6) / 6.0) * (logDf12 - logDf6);
             decimal dfm = (decimal)Math.Exp(logDfm);
             discountFactors[m] = dfm;
-
-            // Compute zero rates
+            
             double annualZeroRate = -Math.Log((double)dfm) / t;
             double monthlyZeroRate = annualZeroRate / 12.0;
             rates = rates.Append(new BondRate()
@@ -256,15 +230,12 @@ public class BondRateService(IHttpClientFactory clientFactory, IOptions<External
         double df6 = df;
         double t7 = month / 12.0d;
 
-        // Step 1: Interpolate next DF
         double logDf6 = Math.Log(df6);
         double logDf7 = (month / 6.0) * logDf6;
         double df7 = Math.Exp(logDf7);
 
-        // Step 2: Calculate the annual zero rate
         double annualZeroRate = -Math.Log(df7) / t7;
 
-        // Step 3: Convert to monthly zero rate
         double monthlyZeroRate = annualZeroRate / 12.0d;
 
         bondRate.AsOfDate = asOfDate;
